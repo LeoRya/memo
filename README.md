@@ -30,7 +30,7 @@
 
 1. 克隆本仓库：
 ```bash
-git clone https://github.com/LeoRya/memo.git
+git clone https://github.com/LeoRya/memo
 cd memo
 ```
 
