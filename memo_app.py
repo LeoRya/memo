@@ -112,8 +112,18 @@ class PriorityColorDialog(QDialog):
     
     def update_color_display(self):
         """更新颜色显示"""
-        bg_color = self.priority_colors.get(str(self.current_priority), {}).get('bg', '#FFF9C4')
-        text_color = self.priority_colors.get(str(self.current_priority), {}).get('text', '#000000')
+        # 定义每个优先级的默认颜色（与程序中一致）
+        default_colors = {
+            1: {'bg': '#FFF9C4', 'text': '#000000'},  # 优先级1: 浅黄背景，黑色文字
+            2: {'bg': '#55FFFF', 'text': '#000000'},  # 优先级2: 青色背景，黑色文字
+            3: {'bg': '#00AA00', 'text': '#FFFFFF'},  # 优先级3: 绿色背景，白色文字
+            4: {'bg': '#FF5500', 'text': '#FFFFFF'},  # 优先级4: 橙色背景，白色文字
+            5: {'bg': '#FF0000', 'text': '#FFFFFF'},  # 优先级5: 红色背景，白色文字
+        }
+        # 获取当前优先级的默认颜色
+        default_color = default_colors.get(self.current_priority, {'bg': '#FFF9C4', 'text': '#000000'})
+        bg_color = self.priority_colors.get(str(self.current_priority), {}).get('bg', default_color['bg'])
+        text_color = self.priority_colors.get(str(self.current_priority), {}).get('text', default_color['text'])
         
         # 更新按钮颜色
         self.bg_button.setStyleSheet(f'background-color: {bg_color}; border: 2px solid #ccc;')
@@ -130,8 +140,20 @@ class PriorityColorDialog(QDialog):
         ''')
         self.preview_label.setText(f'优先级 {self.current_priority} 便签预览')
     
+    def get_default_color_for_priority(self, priority):
+        """获取指定优先级的默认颜色"""
+        default_colors = {
+            1: {'bg': '#FFF9C4', 'text': '#000000'},
+            2: {'bg': '#55FFFF', 'text': '#000000'},
+            3: {'bg': '#00AA00', 'text': '#FFFFFF'},
+            4: {'bg': '#FF5500', 'text': '#FFFFFF'},
+            5: {'bg': '#FF0000', 'text': '#FFFFFF'},
+        }
+        return default_colors.get(priority, {'bg': '#FFF9C4', 'text': '#000000'})
+    
     def select_bg_color(self):
-        current_color = self.priority_colors.get(str(self.current_priority), {}).get('bg', '#FFF9C4')
+        default_color = self.get_default_color_for_priority(self.current_priority)
+        current_color = self.priority_colors.get(str(self.current_priority), {}).get('bg', default_color['bg'])
         color = QColorDialog.getColor(QColor(current_color), self, '选择便签背景颜色')
         if color.isValid():
             color_hex = color.name()
@@ -140,7 +162,8 @@ class PriorityColorDialog(QDialog):
             self.update_color_display()
     
     def select_text_color(self):
-        current_color = self.priority_colors.get(str(self.current_priority), {}).get('text', '#000000')
+        default_color = self.get_default_color_for_priority(self.current_priority)
+        current_color = self.priority_colors.get(str(self.current_priority), {}).get('text', default_color['text'])
         color = QColorDialog.getColor(QColor(current_color), self, '选择便签文字颜色')
         if color.isValid():
             color_hex = color.name()
