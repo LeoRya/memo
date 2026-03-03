@@ -5,11 +5,11 @@ from datetime import datetime, timedelta
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QComboBox, QDateTimeEdit, QPushButton, QListWidget,
-    QLabel, QDialog, QSpinBox, QRadioButton, QGroupBox,
+    QLabel, QDialog, QSpinBox, QRadioButton, QGroupBox, QCheckBox,
     QSystemTrayIcon, QMenu, QAction, QSplitter, QHeaderView, QTableWidget,
     QTableWidgetItem, QAbstractItemView, QColorDialog, QSizeGrip, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QTimer, QEvent
+from PyQt5.QtCore import Qt, QTimer, QEvent, QObject, QPoint
 from PyQt5.QtGui import QPainter, QColor, QPen, QIcon, QPixmap
 
 # 获取资源路径（兼容开发环境和PyInstaller打包环境）
@@ -18,8 +18,9 @@ def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
         # PyInstaller打包后的临时目录
         return os.path.join(sys._MEIPASS, relative_path)
-    # 开发环境
-    return os.path.join(os.path.abspath('.'), relative_path)
+    # 开发环境 - 使用脚本所在目录，而不是当前工作目录
+    script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    return os.path.join(script_dir, relative_path)
 
 TASK_STATUS_IN_PROGRESS = 'in_progress'
 TASK_STATUS_COMPLETED = 'completed'
@@ -155,7 +156,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('设置')
-        self.setFixedSize(400, 280)
+        self.setFixedSize(400, 350)
         self.layout = QVBoxLayout(self)
         self.layout.setSpacing(10)
         self.layout.setContentsMargins(15, 15, 15, 15)
@@ -200,6 +201,17 @@ class SettingsDialog(QDialog):
         self.priority_layout.addLayout(self.priority_count_layout)
         self.priority_group.setLayout(self.priority_layout)
         
+        # 启动设置
+        self.startup_group = QGroupBox('启动设置')
+        self.startup_layout = QVBoxLayout()
+        self.startup_layout.setSpacing(8)
+        
+        self.startup_checkbox = QCheckBox('开机自动启动')
+        self.startup_checkbox.setChecked(parent.settings.get('auto_start', True))
+        self.startup_layout.addWidget(self.startup_checkbox)
+        
+        self.startup_group.setLayout(self.startup_layout)
+        
         # 按钮布局
         self.button_layout = QHBoxLayout()
         self.button_layout.setSpacing(10)
@@ -212,6 +224,7 @@ class SettingsDialog(QDialog):
         
         self.layout.addWidget(self.theme_group)
         self.layout.addWidget(self.priority_group)
+        self.layout.addWidget(self.startup_group)
         self.layout.addStretch()
         self.layout.addLayout(self.button_layout)
     
@@ -305,13 +318,21 @@ class SettingsDialog(QDialog):
         self.parent().settings['priority_count'] = self.priority_spinbox.value()
         self.parent().settings['priority_colors'] = self.priority_colors
         self.parent().settings['theme'] = 'light' if self.theme_combo.currentIndex() == 0 else 'dark'
+        self.parent().settings['auto_start'] = self.startup_checkbox.isChecked()
         self.parent().save_settings()
         self.parent().update_priority_options()
         self.parent().update_reminder_formats()
         self.parent().apply_theme()
+        # 应用开机自启动设置
+        self.parent().apply_auto_start()
         self.accept()
 
 class ReminderWindow(QWidget):
+    # 类变量：跟踪所有打开的提醒框
+    all_reminders = set()
+    # 类变量：跟踪当前选中的提醒框
+    selected_reminders = set()
+    
     def __init__(self, task_id, task_text, priority, deadline, parent=None):
         super().__init__(None)
         self.task_id = task_id
@@ -319,7 +340,13 @@ class ReminderWindow(QWidget):
         self.priority = priority
         self.deadline = deadline
         self.parent_window = parent
-        self.start_pos = None
+        self.drag_start_pos = None
+        self.drag_start_global_pos = None
+        self.is_selected = False
+        self.is_dragging = False  # 标记是否正在拖动
+        
+        # 添加到全局提醒框集合
+        ReminderWindow.all_reminders.add(self)
         
         self.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -415,10 +442,20 @@ class ReminderWindow(QWidget):
         # 获取优先级颜色设置
         priority_colors = self.parent_window.settings.get('priority_colors', {})
         priority_color = priority_colors.get(str(self.priority), {})
+        # 定义每个优先级的默认颜色
+        default_colors = {
+            1: {'bg': '#FFF9C4', 'text': '#000000'},  # 优先级1: 浅黄背景，黑色文字
+            2: {'bg': '#55FFFF', 'text': '#000000'},  # 优先级2: 青色背景，黑色文字
+            3: {'bg': '#00AA00', 'text': '#FFFFFF'},  # 优先级3: 绿色背景，白色文字
+            4: {'bg': '#FF5500', 'text': '#FFFFFF'},  # 优先级4: 橙色背景，白色文字
+            5: {'bg': '#FF0000', 'text': '#FFFFFF'},  # 优先级5: 红色背景，白色文字
+        }
+        # 获取当前优先级的默认颜色
+        default_color = default_colors.get(self.priority, {'bg': '#FFF9C4', 'text': '#000000'})
         # 确保有默认值
         self.priority_color = {
-            'bg': priority_color.get('bg', '#FFF9C4'),
-            'text': priority_color.get('text', '#000000')
+            'bg': priority_color.get('bg', default_color['bg']),
+            'text': priority_color.get('text', default_color['text'])
         }
         
         self.setStyleSheet(f'''
@@ -438,9 +475,27 @@ class ReminderWindow(QWidget):
         
         # 绘制圆角背景
         rect = self.rect()
-        painter.setPen(QPen(QColor('#FFD54F'), 1))
-        painter.setBrush(QColor(self.priority_color['bg']))
-        painter.drawRoundedRect(rect, 12, 12)
+        
+        # 如果被选中，绘制反色边框效果
+        if self.is_selected:
+            # 反色边框：使用与背景色对比明显的颜色
+            bg_color = QColor(self.priority_color['bg'])
+            # 计算反色
+            inverted_color = QColor(255 - bg_color.red(), 255 - bg_color.green(), 255 - bg_color.blue())
+            painter.setPen(QPen(inverted_color, 3))
+            # 绘制填充背景
+            painter.setBrush(bg_color)
+            painter.drawRoundedRect(rect, 12, 12)
+            
+            # 绘制内边框（反色效果）
+            inner_rect = rect.adjusted(4, 4, -4, -4)
+            painter.setPen(QPen(inverted_color, 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(inner_rect, 8, 8)
+        else:
+            painter.setPen(QPen(QColor('#FFD54F'), 1))
+            painter.setBrush(QColor(self.priority_color['bg']))
+            painter.drawRoundedRect(rect, 12, 12)
         
         # 调用父类的paintEvent以绘制子控件
         super().paintEvent(event)
@@ -530,18 +585,123 @@ class ReminderWindow(QWidget):
     
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.start_pos = event.globalPos() - self.frameGeometry().topLeft()
-            event.accept()
+            # 记录拖动起始位置
+            self.drag_start_pos = event.pos()
+            self.drag_start_global_pos = event.globalPos()
+            self.is_dragging = False  # 重置拖动标记
+            
+            # 处理Ctrl+点击多选
+            if event.modifiers() & Qt.ControlModifier:
+                self.toggle_selection()
+                # 更新显示
+                self.update()
+            # 非Ctrl点击时不立即处理选择，在mouseRelease中根据是否拖动来决定
+        event.accept()
+    
+    def event(self, event):
+        # 处理窗口激活事件，当点击便签框时检查是否需要清除其他选择
+        if event.type() == QEvent.WindowActivate:
+            # 当便签框被激活时，检查鼠标位置
+            from PyQt5.QtGui import QCursor
+            global_pos = QCursor.pos()
+            # 如果鼠标不在任何便签框内（可能是点击桌面或其他应用），清除选择
+            clicked_on_any_reminder = False
+            for reminder in ReminderWindow.all_reminders:
+                if reminder.geometry().contains(global_pos):
+                    clicked_on_any_reminder = True
+                    break
+            if not clicked_on_any_reminder:
+                ReminderWindow.clear_all_selections()
+        return super().event(event)
     
     def mouseMoveEvent(self, event):
-        if self.start_pos is not None:
-            self.move(event.globalPos() - self.start_pos)
-            event.accept()
+        if event.buttons() & Qt.LeftButton and self.drag_start_pos:
+            # 标记正在拖动
+            self.is_dragging = True
+            
+            # 计算移动距离
+            delta = event.globalPos() - self.drag_start_global_pos
+            
+            # 如果当前便签被选中，移动所有选中的便签
+            if self.is_selected:
+                for reminder in ReminderWindow.selected_reminders:
+                    new_pos = reminder.pos() + delta
+                    reminder.move(new_pos)
+            else:
+                # 当前便签未被选中，只移动当前便签
+                new_pos = self.pos() + delta
+                self.move(new_pos)
+            
+            # 更新起始位置
+            self.drag_start_global_pos = event.globalPos()
+        event.accept()
     
     def mouseReleaseEvent(self, event):
-        self.start_pos = None
+        if event.button() == Qt.LeftButton:
+            # 如果没有拖动（即这是一次单击），处理选择逻辑
+            if not self.is_dragging and self.drag_start_pos:
+                # 非Ctrl点击时，单击只选择当前便签
+                if not (event.modifiers() & Qt.ControlModifier):
+                    self.clear_all_selections()
+                    self.add_to_selection()
+                    self.update()
+            
+            self.drag_start_pos = None
+            self.drag_start_global_pos = None
+            self.is_dragging = False
+    
+    def toggle_selection(self):
+        """切换当前提醒框的选中状态（Ctrl+点击）"""
+        if self.is_selected:
+            self.is_selected = False
+            ReminderWindow.selected_reminders.discard(self)
+        else:
+            self.is_selected = True
+            ReminderWindow.selected_reminders.add(self)
+    
+    def add_to_selection(self):
+        """将当前提醒框添加到选中集合"""
+        self.is_selected = True
+        ReminderWindow.selected_reminders.add(self)
+    
+    @classmethod
+    def clear_all_selections(cls):
+        """清除所有选中状态"""
+        for reminder in cls.selected_reminders.copy():
+            reminder.is_selected = False
+            reminder.update()
+        cls.selected_reminders.clear()
+    
+    @classmethod
+    def handle_global_mouse_press(cls, global_pos, source_window):
+        """处理全局鼠标按下事件，判断是否点击了便签框外部"""
+        # 检查点击位置是否在任何便签框内
+        clicked_on_reminder = False
+        for reminder in cls.all_reminders:
+            if reminder.geometry().contains(global_pos):
+                clicked_on_reminder = True
+                break
+        
+        # 如果没有点击在任何便签框上，且不是从便签框发起的点击，则清除所有选择
+        if not clicked_on_reminder and source_window not in cls.all_reminders:
+            cls.clear_all_selections()
+    
+    def closeEvent(self, event):
+        # 从集合中移除
+        if self in ReminderWindow.all_reminders:
+            ReminderWindow.all_reminders.remove(self)
+        if self in ReminderWindow.selected_reminders:
+            ReminderWindow.selected_reminders.remove(self)
+        super().closeEvent(event)
     
     def mouseDoubleClickEvent(self, event):
+        # 按住Ctrl+双击：选取所有便签框，不弹出主界面
+        if event.modifiers() & Qt.ControlModifier:
+            self.select_all_reminders()
+            event.accept()
+            return
+        
+        # 普通双击：弹出主界面
         if self.parent_window:
             # 如果窗口被最小化，先恢复正常状态
             if self.parent_window.isMinimized():
@@ -553,6 +713,14 @@ class ReminderWindow(QWidget):
             self.parent_window.raise_()
             self.parent_window.activateWindow()
         event.accept()
+    
+    @classmethod
+    def select_all_reminders(cls):
+        """选取所有便签框"""
+        for reminder in cls.all_reminders:
+            reminder.is_selected = True
+            cls.selected_reminders.add(reminder)
+            reminder.update()
     
     def update_countdown(self):
         now = datetime.now()
@@ -610,6 +778,9 @@ class MemoApp(QMainWindow):
         # 应用主题
         self.apply_theme()
         
+        # 应用开机自启动设置
+        self.apply_auto_start()
+        
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.main_layout = QHBoxLayout(self.central_widget)
@@ -660,7 +831,12 @@ class MemoApp(QMainWindow):
         self.deadline_mode.currentIndexChanged.connect(self.update_deadline_input)
         
         self.deadline_input = QDateTimeEdit()
-        self.deadline_input.setDateTime(datetime.now() + timedelta(hours=1))
+        self.deadline_input.setDateTime(datetime.now().replace(second=0, microsecond=0) + timedelta(hours=1))
+        
+        # 创建定时器，每秒更新一次默认截止时间
+        self.deadline_timer = QTimer(self)
+        self.deadline_timer.timeout.connect(self.update_deadline_default_time)
+        self.deadline_timer.start(1000)  # 每秒更新一次
         
         self.countdown_input = QSpinBox()
         self.countdown_input.setRange(1, 86400)
@@ -728,20 +904,76 @@ class MemoApp(QMainWindow):
         self.load_tasks()
         self.show_active_reminders()
     
+    def get_data_path(self, filename):
+        """获取数据文件的完整路径"""
+        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        return os.path.join(script_dir, filename)
+    
     def load_settings(self):
         try:
-            with open('settings.json', 'r', encoding='utf-8') as f:
-                return json.load(f)
+            settings_path = self.get_data_path('settings.json')
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+                # 确保auto_start有默认值
+                if 'auto_start' not in settings:
+                    settings['auto_start'] = True
+                return settings
         except Exception as e:
             print(f"加载设置失败: {e}")
-            return {'priority_count': 5}
+            return {'priority_count': 5, 'auto_start': True}
     
     def save_settings(self):
         try:
-            with open('settings.json', 'w', encoding='utf-8') as f:
+            settings_path = self.get_data_path('settings.json')
+            with open(settings_path, 'w', encoding='utf-8') as f:
                 json.dump(self.settings, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"保存设置失败: {e}")
+    
+    def apply_auto_start(self):
+        """应用开机自启动设置"""
+        try:
+            import winreg
+            # 获取程序路径
+            if hasattr(sys, '_MEIPASS'):
+                # PyInstaller打包后的路径
+                exe_path = os.path.join(sys._MEIPASS, 'memo_app.exe')
+                exe_path = f'"{exe_path}"'
+            else:
+                # 开发环境 - 使用当前脚本路径
+                script_path = os.path.abspath(sys.argv[0])
+                # 获取pythonw.exe的完整路径
+                python_exe = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+                # 如果pythonw.exe不存在，使用python.exe
+                if not os.path.exists(python_exe):
+                    python_exe = sys.executable
+                
+                # 如果是.py文件，使用pythonw.exe运行
+                if script_path.endswith('.py'):
+                    exe_path = f'"{python_exe}" "{script_path}"'
+                else:
+                    exe_path = f'"{script_path}"'
+            
+            # 打开注册表项
+            key_path = r'Software\Microsoft\Windows\CurrentVersion\Run'
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
+            
+            auto_start = self.settings.get('auto_start', True)
+            if auto_start:
+                # 添加开机自启动项
+                winreg.SetValueEx(key, 'MemoApp', 0, winreg.REG_SZ, exe_path)
+                print(f"已设置开机自启动: {exe_path}")
+            else:
+                # 删除开机自启动项
+                try:
+                    winreg.DeleteValue(key, 'MemoApp')
+                    print("已取消开机自启动")
+                except FileNotFoundError:
+                    pass  # 如果键不存在，忽略错误
+            
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f"设置开机自启动失败: {e}")
     
     def apply_theme(self):
         """应用主题样式"""
@@ -941,7 +1173,8 @@ class MemoApp(QMainWindow):
     
     def load_tasks(self):
         try:
-            with open('tasks.json', 'r', encoding='utf-8') as f:
+            tasks_path = self.get_data_path('tasks.json')
+            with open(tasks_path, 'r', encoding='utf-8') as f:
                 tasks = json.load(f)
                 for task in tasks:
                     if 'deadline' in task:
@@ -966,6 +1199,7 @@ class MemoApp(QMainWindow):
     
     def save_tasks(self):
         try:
+            tasks_path = self.get_data_path('tasks.json')
             tasks_to_save = []
             for task in self.tasks:
                 task_copy = task.copy()
@@ -974,7 +1208,7 @@ class MemoApp(QMainWindow):
                 if task_copy.get('mode') == 'datetime' and isinstance(task_copy['deadline'], datetime):
                     task_copy['deadline'] = task_copy['deadline'].isoformat()
                 tasks_to_save.append(task_copy)
-            with open('tasks.json', 'w', encoding='utf-8') as f:
+            with open(tasks_path, 'w', encoding='utf-8') as f:
                 json.dump(tasks_to_save, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"保存任务失败: {e}")
@@ -991,6 +1225,36 @@ class MemoApp(QMainWindow):
         else:
             self.deadline_input.hide()
             self.countdown_input.show()
+    
+    def update_deadline_default_time(self, force=False):
+        """更新截止时间的默认值为当前时间后1小时，秒数固定为00
+        
+        Args:
+            force: 如果为True，强制更新，不检查用户是否手动修改过
+        """
+        # 只有在"具体时间"模式下才更新
+        if self.deadline_mode.currentIndex() != 0:
+            return
+        
+        now = datetime.now()
+        # 计算1小时后的时间，并将秒数设为00
+        default_time = now + timedelta(hours=1)
+        default_time = default_time.replace(second=0, microsecond=0)
+        
+        if force:
+            # 强制更新，不检查
+            self.deadline_input.setDateTime(default_time)
+        else:
+            # 获取当前显示的时间
+            current_display_time = self.deadline_input.dateTime().toPyDateTime()
+            
+            # 计算当前显示时间与期望默认时间的差值（分钟）
+            time_diff = abs((current_display_time - default_time).total_seconds() / 60)
+            
+            # 如果差值在1分钟以内，认为是默认值，需要更新
+            # 如果差值超过1分钟，说明用户手动修改过，不更新
+            if time_diff <= 1:
+                self.deadline_input.setDateTime(default_time)
     
     def open_settings(self):
         dialog = SettingsDialog(self)
@@ -1225,7 +1489,7 @@ class MemoApp(QMainWindow):
         
         self.task_input.clear()
         if self.deadline_mode.currentIndex() == 0:
-            self.deadline_input.setDateTime(datetime.now() + timedelta(hours=1))
+            self.update_deadline_default_time(force=True)
         else:
             self.countdown_input.setValue(3600)
         
@@ -1301,6 +1565,11 @@ class MemoApp(QMainWindow):
             return True
         return super().eventFilter(obj, event)
     
+    def mousePressEvent(self, event):
+        # 当点击主窗口时，检查是否点击在便签框外部
+        ReminderWindow.handle_global_mouse_press(event.globalPos(), self)
+        super().mousePressEvent(event)
+    
     def tray_icon_activated(self, reason):
         # 双击托盘图标时只弹出主界面
         if reason == QSystemTrayIcon.DoubleClick:
@@ -1334,6 +1603,48 @@ class MemoApp(QMainWindow):
                     self.reminders[task_id] = new_reminder
                     break
 
+class GlobalMouseMonitor(QObject):
+    """全局鼠标监视器，使用Windows钩子检测点击便签框外部的情况"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.hook_id = None
+        self.hook_proc = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.check_mouse_click)
+        self.timer.start(50)  # 每50ms检查一次鼠标状态
+        self.last_mouse_state = False
+        self.last_click_pos = None
+    
+    def check_mouse_click(self):
+        """通过检查鼠标状态来检测点击"""
+        import ctypes
+        from ctypes import wintypes
+        
+        # 获取当前鼠标按键状态 (VK_LBUTTON = 0x01)
+        user32 = ctypes.windll.user32
+        current_state = user32.GetAsyncKeyState(0x01) & 0x8000 != 0
+        
+        # 检测鼠标左键按下事件（从释放到按下）
+        if current_state and not self.last_mouse_state:
+            # 获取鼠标位置
+            point = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(point))
+            global_pos = QPoint(point.x, point.y)
+            
+            # 检查点击位置是否在任何便签框内
+            clicked_on_reminder = False
+            for reminder in ReminderWindow.all_reminders:
+                if reminder.isVisible() and reminder.geometry().contains(global_pos):
+                    clicked_on_reminder = True
+                    break
+            
+            # 如果没有点击在任何便签框上，清除所有选择
+            if not clicked_on_reminder and ReminderWindow.selected_reminders:
+                ReminderWindow.clear_all_selections()
+        
+        self.last_mouse_state = current_state
+
+
 if __name__ == '__main__':
     import ctypes
     from PyQt5.QtCore import QSharedMemory, QSystemSemaphore
@@ -1360,6 +1671,10 @@ if __name__ == '__main__':
     app.setApplicationName('备忘录')
     app.setApplicationDisplayName('备忘录')
     app.setQuitOnLastWindowClosed(False)  # 关闭窗口时不退出程序
+    
+    # 创建全局鼠标监视器
+    mouse_monitor = GlobalMouseMonitor(app)
+    
     window = MemoApp()
     window.show()
     sys.exit(app.exec_())
