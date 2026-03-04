@@ -642,6 +642,12 @@ class ReminderWindow(QWidget):
             # 标记正在拖动
             self.is_dragging = True
             
+            # 如果当前便签未被选中，选中它并取消其他便签的选中状态
+            if not self.is_selected:
+                self.clear_all_selections()
+                self.add_to_selection()
+                self.update()
+            
             # 计算移动距离
             delta = event.globalPos() - self.drag_start_global_pos
             
@@ -895,6 +901,9 @@ class MemoApp(QMainWindow):
         self.task_table.setTextElideMode(Qt.ElideRight)
         # 设置行高
         self.task_table.verticalHeader().setDefaultSectionSize(50)
+        # 启用自定义上下文菜单
+        self.task_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.task_table.customContextMenuRequested.connect(self.show_task_context_menu)
         
         self.right_layout.addLayout(self.title_layout)
         self.right_layout.addLayout(self.input_layout)
@@ -1320,6 +1329,34 @@ class MemoApp(QMainWindow):
                 button.setText(base_text)
         
         self.update_task_table()
+    
+    def show_task_context_menu(self, position):
+        """显示任务右键菜单"""
+        # 获取点击的行
+        row = self.task_table.rowAt(position.y())
+        if row < 0:
+            return
+        
+        # 获取该行的任务内容
+        task_item = self.task_table.item(row, 0)
+        if not task_item:
+            return
+        
+        task_text = task_item.text()
+        
+        # 创建右键菜单
+        menu = QMenu(self)
+        copy_action = QAction('复制任务内容', self)
+        copy_action.triggered.connect(lambda: self.copy_task_text(task_text))
+        menu.addAction(copy_action)
+        
+        # 显示菜单
+        menu.exec_(self.task_table.viewport().mapToGlobal(position))
+    
+    def copy_task_text(self, text):
+        """复制任务内容到剪贴板"""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
     
     def update_task_table(self):
         self.task_table.setRowCount(0)
